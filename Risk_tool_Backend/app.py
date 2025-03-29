@@ -27,10 +27,37 @@ app = Flask(__name__)
 CORS(app)
 
 FMP_API_KEY = "0ZZGmW9nWWQGlAwK4607M0HQo9kSO45u"
-NEWS_API_KEY = "a7dcf670c4d94b7abb15360e55a97c17"  # Your real NewsAPI key
+NEWS_API_KEY = "a7dcf670c4d94b7abb15360e55a97c17"
 
-# ... (previous imports and setup remain unchanged)
+# Function to fetch news articles for a ticker (extracted for reuse)
+def fetch_news_articles(ticker, newsapi):
+    sentiment_score = 0
+    news_articles = []
+    try:
+        articles = newsapi.get_everything(q=ticker, language='en', sort_by='relevancy', page_size=10)
+        if articles['articles']:
+            for article in articles['articles']:
+                text = article['title'] + " " + (article['description'] or "")
+                analysis = TextBlob(text)
+                sentiment_score += analysis.sentiment.polarity
+                if len(news_articles) < 3:
+                    news_articles.append({
+                        "title": article['title'] or "No title available",
+                        "description": article['description'] or "No description available.",
+                        "url": article['url'] or "#",
+                        "source": article['source']['name'] if article['source'] and 'name' in article['source'] else "Unknown Source",
+                        "publishedAt": article['publishedAt'] or "Unknown Date"
+                    })
+            sentiment_score /= len(articles['articles'])
+        else:
+            print(f"No articles found for {ticker}, defaulting to neutral sentiment.")
+            sentiment_score = 0
+    except Exception as e:
+        print(f"Error fetching news for {ticker}: {str(e)}")
+        sentiment_score = 0
+    return news_articles, sentiment_score
 
+# Existing /api/simulate endpoint (updated to use fetch_news_articles)
 @app.route('/api/simulate', methods=['GET'])
 def simulate():
     try:
@@ -104,33 +131,9 @@ def simulate():
             ma_long = float(returns_series.rolling(window=50).mean().iloc[-1])
             trend = "Bullish" if ma_short > ma_long else "Bearish"
 
-            # Sentiment analysis using NewsAPI
-            sentiment_score = 0
-            news_articles = []  # Store articles to return to frontend
-            try:
-                articles = newsapi.get_everything(q=ticker, language='en', sort_by='relevancy', page_size=10)
-                if articles['articles']:
-                    for article in articles['articles']:
-                        text = article['title'] + " " + (article['description'] or "")
-                        analysis = TextBlob(text)
-                        sentiment_score += analysis.sentiment.polarity
-                        # Store article details (limit to top 3 for display)
-                        if len(news_articles) < 3:
-                            news_articles.append({
-                                "title": article['title'] or "No title available",
-                                "description": article['description'] or "No description available.",
-                                "url": article['url'] or "#",
-                                "source": article['source']['name'] if article['source'] and 'name' in article['source'] else "Unknown Source",
-                                "publishedAt": article['publishedAt'] or "Unknown Date"
-                            })
-                    sentiment_score /= len(articles['articles'])
-                else:
-                    print(f"No articles found for {ticker}, defaulting to neutral sentiment.")
-                    sentiment_score = 0  # Fallback if no articles are found
-            except Exception as e:
-                print(f"Error fetching news for {ticker}: {str(e)}")
-                sentiment_score = 0  # Fallback if NewsAPI fails
-            sentiment_adjustment = 1 + (sentiment_score * 0.1)  # Adjust return by up to 10% based on sentiment
+            # Fetch news articles and sentiment
+            news_articles, sentiment_score = fetch_news_articles(ticker, newsapi)
+            sentiment_adjustment = 1 + (sentiment_score * 0.1)
 
             predictions[ticker] = {
                 "mean_predicted_return": mean_predicted_return * sentiment_adjustment,
@@ -139,7 +142,7 @@ def simulate():
                 "historical_volatility": hist_volatility,
                 "trend": trend,
                 "sentiment_score": sentiment_score,
-                "news_articles": news_articles  # Already included
+                "news_articles": news_articles
             }
 
         # Monte Carlo Simulation for each stock
@@ -184,8 +187,8 @@ def simulate():
                 "historical_volatility": predictions[ticker]["historical_volatility"],
                 "trend": predictions[ticker]["trend"],
                 "sentiment_score": predictions[ticker]["sentiment_score"],
-                "news_articles": predictions[ticker]["news_articles"],  # Already included
-                "historical_prices": hist['Close'].tail(100).tolist()  # Last 100 days for trend chart
+                "news_articles": predictions[ticker]["news_articles"],
+                "historical_prices": hist['Close'].tail(100).tolist()
             }
 
             portfolio_npv += npv
@@ -215,6 +218,26 @@ def simulate():
     except Exception as e:
         traceback.print_exc()
         return {"error": f"Server error: {str(e)}"}, 500
+
+# New endpoint to fetch news for a single stock
+@app.route('/api/news', methods=['GET'])
+def get_news():
+    try:
+        ticker = request.args.get('ticker')
+        if not ticker:
+            return {"error": "Ticker is required"}, 400
+
+        newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+        news_articles, sentiment_score = fetch_news_articles(ticker, newsapi)
+
+        return {
+            "ticker": ticker,
+            "news_articles": news_articles,
+            "sentiment_score": sentiment_score
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to fetch news: {str(e)}"}, 500
 
 if __name__ == "__main__":
     app.run(debug=True)
